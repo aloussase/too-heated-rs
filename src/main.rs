@@ -57,14 +57,10 @@ impl GetGithub for reqwest::Client {
 }
 
 async fn get_repositories(client: &Client, url: &str) -> Vec<Repository> {
-    client
-        .get_github(url)
-        .send()
-        .await
-        .expect("failed to get repositories")
-        .json()
-        .await
-        .expect("failed to parse repositories")
+    match client.get_github(url).send().await {
+        Ok(response) => response.json().await.unwrap_or(Vec::new()),
+        _ => Vec::new(),
+    }
 }
 
 async fn search_too_heated_issues(client: &Client, repository: &Repository) -> HashSet<Issue> {
@@ -75,11 +71,12 @@ async fn search_too_heated_issues(client: &Client, repository: &Repository) -> H
         let url = &format!("{}?page={}&per_page=100&state=closed", issues_url, page);
         println!("Searching issues: {}", url);
 
-        let response = client
-            .get_github(url)
-            .send()
-            .await
-            .expect("failed to get issues");
+        let response = {
+            match client.get_github(url).send().await {
+                Ok(response) => response,
+                _ => continue,
+            }
+        };
 
         let issues_payload: Vec<Issue> = {
             match response.json().await {
@@ -126,23 +123,21 @@ fn get_random_repo_url(seen_ids: &mut SeenIds) -> String {
     format!("{}?since={}", GITUHB_REPO_URL, random_id)
 }
 
-async fn store_respositories(conn: &mut SqliteConnection, repositories: HashSet<Repository>) {
-    for repository in repositories {
-        sqlx::query!(
-            r#"
+async fn store_respository(conn: &mut SqliteConnection, repository: Repository) {
+    sqlx::query!(
+        r#"
         INSERT INTO repositories (id_repo, name, forks_url, stars_url, commits_url)
         VALUES ($1, $2, $3, $4, $5)
         "#,
-            repository.id,
-            repository.name,
-            repository.forks_url,
-            repository.stargazers_url,
-            repository.commits_url
-        )
-        .execute(&mut *conn)
-        .await
-        .expect("failed to store repository in database");
-    }
+        repository.id,
+        repository.name,
+        repository.forks_url,
+        repository.stargazers_url,
+        repository.commits_url
+    )
+    .execute(&mut *conn)
+    .await
+    .expect("failed to store repository in database");
 }
 
 async fn store_issues(conn: &mut SqliteConnection, issues: HashSet<Issue>) {
@@ -173,9 +168,6 @@ async fn main() {
     let client = Client::new();
     let mut url = get_random_repo_url(&mut seen_ids);
 
-    let mut chosen_repositories = HashSet::new();
-    let mut chosen_issues = HashSet::new();
-
     let mut conn = SqliteConnection::connect(&opts.database_url).await.unwrap();
 
     for _ in 0..opts.iterations {
@@ -188,15 +180,12 @@ async fn main() {
             let too_heated_issues = search_too_heated_issues(&client, &repository).await;
             if !too_heated_issues.is_empty() {
                 println!("Found too heated issues in repository: {}", repository.name);
-                chosen_repositories.insert(repository);
-                chosen_issues.extend(too_heated_issues);
+                store_respository(&mut conn, repository).await;
+                store_issues(&mut conn, too_heated_issues).await;
             }
         }
 
         url = get_random_repo_url(&mut seen_ids);
         std::thread::sleep(Duration::from_secs(1));
     }
-
-    store_respositories(&mut conn, chosen_repositories).await;
-    store_issues(&mut conn, chosen_issues).await;
 }
