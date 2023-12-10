@@ -67,7 +67,7 @@ async fn search_too_heated_issues(client: &Client, repository: &Repository) -> H
     let issues_url = repository.issues_url.strip_suffix("{/number}").unwrap();
     let mut issues = HashSet::new();
 
-    for page in 1..100 {
+    for page in 1..50 {
         let url = &format!("{}?page={}&per_page=100&state=closed", issues_url, page);
         println!("Searching issues: {}", url);
 
@@ -102,7 +102,7 @@ async fn search_too_heated_issues(client: &Client, repository: &Repository) -> H
             });
 
         issues.extend(too_heated_issues);
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(5));
     }
 
     issues
@@ -186,6 +186,6 @@ async fn main() {
         }
 
         url = get_random_repo_url(&mut seen_ids);
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(5));
     }
 }
