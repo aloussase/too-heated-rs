@@ -1,4 +1,4 @@
-CREATE TABLE `Repositories` (
+CREATE TABLE IF NOT EXISTS `Repositories` (
     `id_repo` INTEGER,
     `name` text NOT NULL,
     `stars_url` text NOT NULL,
@@ -7,7 +7,7 @@ CREATE TABLE `Repositories` (
     PRIMARY KEY (`id_repo`)
 );
 
-CREATE TABLE `Issues` (
+CREATE TABLE IF NOT EXISTS `Issues` (
     `id_issue` INTEGER,
     `id_repo` INTEGER,
     `created_at` text,
@@ -17,7 +17,7 @@ CREATE TABLE `Issues` (
     FOREIGN KEY(`id_repo`) REFERENCES Repositories(`id_repo`)
 );
 
-CREATE TABLE `Comments` (
+CREATE TABLE IF NOT EXISTS `Comments` (
     `id_comment` INTEGER,
     `id_issue` INTEGER,
     `created_at` text,
