@@ -17,15 +17,12 @@ CREATE TABLE `Issues` (
     FOREIGN KEY(`id_repo`) REFERENCES Repositories(`id_repo`)
 );
 
-/*
 CREATE TABLE `Comments` (
     `id_comment` INTEGER,
     `id_issue` INTEGER,
-    `date` DATE,
-    `title` VARCHAR(100) NOT NULL,
+    `created_at` text,
     `text` TEXT NOT NULL,
     `is_toxic` INTEGER(1) NOT NULL DEFAULT 0,
     PRIMARY KEY (`id_comment`),
     FOREIGN KEY(`id_issue`) REFERENCES Issues(`id_issue`)
 );
-*/

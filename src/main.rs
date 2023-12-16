@@ -7,7 +7,7 @@ use reqwest::{
     Client,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqliteConnection, Connection};
+use sqlx::{sqlite::SqliteConnection, Connection, Row};
 use structopt::StructOpt;
 
 const GITUHB_REPO_URL: &str = "https://api.github.com/repositories";
@@ -16,8 +16,10 @@ const GITUHB_REPO_URL: &str = "https://api.github.com/repositories";
 struct Opts {
     #[structopt(short, long)]
     database_url: String,
-    #[structopt(short, long)]
-    iterations: u32,
+    #[structopt(short, long, required_unless = "populate-comments")]
+    iterations: Option<u32>,
+    #[structopt(long)]
+    populate_comments: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
@@ -40,6 +42,14 @@ struct Issue {
     locked: bool,
     active_lock_reason: Option<String>,
     state: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
+struct Comment {
+    id: i32,
+    body: String,
+    created_at: String,
+    issue_id: Option<i32>,
 }
 
 trait GetGithub {
@@ -108,6 +118,57 @@ async fn search_too_heated_issues(client: &Client, repository: &Repository) -> H
     issues
 }
 
+async fn populate_comments(conn: &mut SqliteConnection, client: &Client) {
+    let issues = sqlx::query("SELECT * FROM Issues")
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+    
+    let mut comments = HashSet::new();
+    
+    for issue in issues.iter() {
+        let mut page = 1;
+        let comments_url: String = issue.get("comments_url");
+        let id_issue: i32 = issue.get("id_issue");
+        
+
+        loop {
+            let url = &format!("{}?page={}&per_page=100", comments_url, page);
+            println!("Retrieving Comments: {}", url);
+
+            let response = {
+                match client.get_github(url).send().await {
+                    Ok(response) => response,
+                    _ => continue,
+                }
+            };
+
+            let comments_payload: Vec<Comment> = {
+                match response.json().await {
+                    Ok(comments) => comments,
+                    Err(_) => continue,
+                }
+            };
+
+            if comments_payload.is_empty() {
+                break;
+            }
+
+            let formated_comments = comments_payload
+                .into_iter()
+                .map(|mut comment| {
+                    comment.issue_id = Some(id_issue);
+                    comment
+                });
+
+            comments.extend(formated_comments);
+            page += 1;
+        }
+    }
+
+    store_comments(conn, comments).await;
+}
+
 type SeenIds = HashSet<u16>;
 
 fn get_random_repo_url(seen_ids: &mut SeenIds) -> String {
@@ -126,7 +187,7 @@ fn get_random_repo_url(seen_ids: &mut SeenIds) -> String {
 async fn store_respository(conn: &mut SqliteConnection, repository: Repository) {
     sqlx::query!(
         r#"
-        INSERT INTO repositories (id_repo, name, forks_url, stars_url, commits_url)
+        INSERT OR IGNORE INTO repositories (id_repo, name, forks_url, stars_url, commits_url)
         VALUES ($1, $2, $3, $4, $5)
         "#,
         repository.id,
@@ -144,7 +205,7 @@ async fn store_issues(conn: &mut SqliteConnection, issues: HashSet<Issue>) {
     for issue in issues {
         sqlx::query!(
             r#"
-        INSERT INTO Issues (id_issue, id_repo, created_at, title, comments_url)
+        INSERT OR IGNORE INTO Issues (id_issue, id_repo, created_at, title, comments_url)
         VALUES ($1, $2, $3, $4, $5)
         "#,
             issue.id,
@@ -155,7 +216,26 @@ async fn store_issues(conn: &mut SqliteConnection, issues: HashSet<Issue>) {
         )
         .execute(&mut *conn)
         .await
-        .expect("failed to store repository in database");
+        .expect("failed to store issue in database");
+    }
+}
+
+async fn store_comments(conn: &mut SqliteConnection, comments: HashSet<Comment>) {
+    for comment in comments {
+        sqlx::query!(
+            r#"
+        INSERT OR IGNORE INTO Comments (id_comment, id_issue, created_at, text, is_toxic)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+            comment.id,
+            comment.issue_id,
+            comment.created_at,
+            comment.body,
+            0
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("failed to store comment in database");
     }
 }
 
@@ -170,22 +250,31 @@ async fn main() {
 
     let mut conn = SqliteConnection::connect(&opts.database_url).await.unwrap();
 
-    for _ in 0..opts.iterations {
-        println!("Searching repositories: {}", url);
-        let repositories = get_repositories(&client, &url).await;
+    if opts.populate_comments {
+        println!("Retrieving and storing Comments for all Issues...");
+        populate_comments(&mut conn, &client).await;
 
-        for repository in repositories {
-            println!("Searching issues: {}", repository.name);
+    } else {
 
-            let too_heated_issues = search_too_heated_issues(&client, &repository).await;
-            if !too_heated_issues.is_empty() {
-                println!("Found too heated issues in repository: {}", repository.name);
-                store_respository(&mut conn, repository).await;
-                store_issues(&mut conn, too_heated_issues).await;
+        for _ in 0..opts.iterations.unwrap() {
+            println!("Searching repositories: {}", url);
+            let repositories = get_repositories(&client, &url).await;
+    
+            for repository in repositories {
+                println!("Searching issues: {}", repository.name);
+    
+                let too_heated_issues = search_too_heated_issues(&client, &repository).await;
+                if !too_heated_issues.is_empty() {
+                    println!("Found too heated issues in repository: {}", repository.name);
+                    store_respository(&mut conn, repository).await;
+                    store_issues(&mut conn, too_heated_issues).await;
+                }
             }
+    
+            url = get_random_repo_url(&mut seen_ids);
+            std::thread::sleep(Duration::from_secs(5));
         }
 
-        url = get_random_repo_url(&mut seen_ids);
-        std::thread::sleep(Duration::from_secs(5));
     }
+
 }
