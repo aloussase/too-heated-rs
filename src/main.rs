@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
-use std::fs::File;
-use std::io::Write;
 
+use csv;
 use reqwest::{
     self,
     header::{ACCEPT, AUTHORIZATION, USER_AGENT},
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqliteConnection, Connection, Row};
 use structopt::StructOpt;
 
-use chrono::{NaiveDateTime, Days};
+use chrono::{Days, NaiveDateTime};
 
 const GITUHB_REPO_URL: &str = "https://api.github.com/repositories";
 
@@ -59,8 +58,30 @@ struct Comment {
 }
 
 #[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
+struct CommitParticipant {
+    date: String,
+    name: String,
+    email: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
+struct CommitInfo {
+    author: CommitParticipant,
+    committer: CommitParticipant,
+}
+
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
 struct Commit {
     url: String,
+    commit: CommitInfo,
+}
+
+#[derive(Serialize, Deserialize, Debug, Hash, Eq, PartialEq)]
+struct CommitFlat {
+    authored_date: String,
+    committed_date: String,
+    before_or_after: String,
+    id_issue: i32,
 }
 
 trait GetGithub {
@@ -134,14 +155,13 @@ async fn populate_comments(conn: &mut SqliteConnection, client: &Client) {
         .fetch_all(&mut *conn)
         .await
         .unwrap();
-    
+
     let mut comments = HashSet::new();
-    
+
     for issue in issues.iter() {
         let mut page = 1;
         let comments_url: String = issue.get("comments_url");
         let id_issue: i32 = issue.get("id_issue");
-        
 
         loop {
             let url = &format!("{}?page={}&per_page=100", comments_url, page);
@@ -165,12 +185,10 @@ async fn populate_comments(conn: &mut SqliteConnection, client: &Client) {
                 break;
             }
 
-            let formated_comments = comments_payload
-                .into_iter()
-                .map(|mut comment| {
-                    comment.issue_id = Some(id_issue);
-                    comment
-                });
+            let formated_comments = comments_payload.into_iter().map(|mut comment| {
+                comment.issue_id = Some(id_issue);
+                comment
+            });
 
             comments.extend(formated_comments);
             page += 1;
@@ -181,15 +199,13 @@ async fn populate_comments(conn: &mut SqliteConnection, client: &Client) {
 }
 
 async fn count_commits_and_forks(conn: &mut SqliteConnection, client: &Client) {
-
-    let mut data_file = File::create("data.csv").expect("creation failed");
-    data_file.write("id_comment,id_issue,commits_before,commits_after\n".as_bytes()).expect("write failed");
+    let mut writer = csv::Writer::from_path("data.csv").unwrap();
 
     let comments = sqlx::query(
         r#"
         SELECT id_comment, Issues.id_issue as id_issue, Comments.created_at as created_at, Repositories.commits_url as commits_url
-        FROM Comments, Repositories, Issues 
-        WHERE is_toxic = 1 and Comments.id_issue = Issues.id_issue and Issues.id_repo = Repositories.id_repo
+          FROM Comments, Repositories, Issues 
+         WHERE is_toxic = 1 and Comments.id_issue = Issues.id_issue and Issues.id_repo = Repositories.id_repo
         "#)
         .fetch_all(&mut *conn)
         .await
@@ -197,20 +213,20 @@ async fn count_commits_and_forks(conn: &mut SqliteConnection, client: &Client) {
 
     for comment in comments.iter() {
         let created_at: String = comment.get("created_at");
-        let mut commits_url: String = comment.get("commits_url");
-        commits_url = commits_url.strip_suffix("{/sha}").unwrap().to_string();
+        let commits_url = comment
+            .get::<String, _>("commits_url")
+            .strip_suffix("{/sha}")
+            .unwrap()
+            .to_string();
         let id_issue: i32 = comment.get("id_issue");
-        let id_comment: i32 = comment.get("id_comment");
-        
-        write!(data_file, "{},{},", id_comment, id_issue).unwrap();
 
         let (since, until) = get_since_and_until(&created_at);
-        
-        let mut page = 1;
-        let mut count = 0;
-        
-        loop {
-            let url = &format!("{}?page={}&per_page=100&since={}&until={}", commits_url, page, since, created_at);
+
+        for page in 1..100 {
+            let url = &format!(
+                "{}?page={}&per_page=100&since={}&until={}",
+                commits_url, page, since, created_at
+            );
             println!("Retrieving Commits: {}", url);
 
             let response = {
@@ -231,16 +247,23 @@ async fn count_commits_and_forks(conn: &mut SqliteConnection, client: &Client) {
                 break;
             }
 
-            count += payload.into_iter().count();
-            page += 1;
+            for commit in payload {
+                writer
+                    .serialize(CommitFlat {
+                        id_issue,
+                        authored_date: commit.commit.author.date,
+                        committed_date: commit.commit.committer.date,
+                        before_or_after: "before".to_string(),
+                    })
+                    .expect("failed to write commit to csv");
+            }
         }
 
-        page = 1;
-        write!(data_file, "{},", count).unwrap();
-        count = 0;
-
-        loop {
-            let url = &format!("{}?page={}&per_page=100&since={}&until={}", commits_url, page, created_at, until);
+        for page in 1..100 {
+            let url = &format!(
+                "{}?page={}&per_page=100&since={}&until={}",
+                commits_url, page, created_at, until
+            );
             println!("Retrieving Commits: {}", url);
 
             let response = {
@@ -261,13 +284,20 @@ async fn count_commits_and_forks(conn: &mut SqliteConnection, client: &Client) {
                 break;
             }
 
-            count += payload.into_iter().count();
-            page += 1;
+            for commit in payload {
+                writer
+                    .serialize(CommitFlat {
+                        id_issue,
+                        authored_date: commit.commit.author.date,
+                        committed_date: commit.commit.committer.date,
+                        before_or_after: "after".to_string(),
+                    })
+                    .expect("failed to write commit to csv");
+            }
         }
 
-        write!(data_file, "{}\n", count).unwrap();
+        writer.flush().unwrap();
     }
-
 }
 
 type SeenIds = HashSet<u16>;
@@ -366,20 +396,17 @@ async fn main() {
     if opts.populate_comments {
         println!("Retrieving and storing Comments for all Issues...");
         populate_comments(&mut conn, &client).await;
-
     } else if opts.generate_csv {
         println!("Counting commits, forks and generating CSV...");
         count_commits_and_forks(&mut conn, &client).await;
-    
     } else {
-
         for _ in 0..opts.iterations.unwrap() {
             println!("Searching repositories: {}", url);
             let repositories = get_repositories(&client, &url).await;
-    
+
             for repository in repositories {
                 println!("Searching issues: {}", repository.name);
-    
+
                 let too_heated_issues = search_too_heated_issues(&client, &repository).await;
                 if !too_heated_issues.is_empty() {
                     println!("Found too heated issues in repository: {}", repository.name);
@@ -387,11 +414,9 @@ async fn main() {
                     store_issues(&mut conn, too_heated_issues).await;
                 }
             }
-    
+
             url = get_random_repo_url(&mut seen_ids);
             std::thread::sleep(Duration::from_secs(5));
         }
-
     }
-
 }
